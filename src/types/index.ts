@@ -17,6 +17,7 @@ export interface VideoClip {
   format: string
   data?: Blob | ArrayBuffer
   thumbnailUrl?: string
+  thumbnails?: string[] // Array of thumbnail data URLs
   startTime: number
   endTime: number
   x: number
@@ -24,6 +25,10 @@ export interface VideoClip {
   scale: number
   rotation: number
   opacity: number
+  originalWidth: number
+  originalHeight: number
+  originalFps: number
+  objectUrl?: string
 }
 
 export interface AudioTrack {
@@ -35,6 +40,7 @@ export interface AudioTrack {
   endTime: number
   volume: number
   isMuted: boolean
+  waveformData?: number[] // Normalized peaks
 }
 
 // ============================================
@@ -130,11 +136,12 @@ export interface Timeline {
 
 export interface ProjectSettings {
   outputFormat: 'mp4' | 'webm' | 'mov' | 'mkv'
-  outputQuality: 'low' | 'medium' | 'high' | 'ultra'
-  outputResolution: '1080p' | '720p' | '480p' | '4K'
+  outputQuality: 'low' | 'medium' | 'high' | 'ultra' | 'original'
+  outputResolution: '1080p' | '720p' | '480p' | '4K' | 'original'
   bitrate: number
   audioCodec: 'aac' | 'mp3' | 'opus'
   audioSampleRate: 44100 | 48000 | 96000
+  preserveOriginal: boolean // Always preserve original quality by default
 }
 
 export interface Project {

@@ -1,10 +1,7 @@
-/**
- * Zustand Store Configuration
- * Centralized state management for the entire application
- */
-
 import { create } from 'zustand'
-import { Project, EditorState, UIState, Timeline, ProjectSettings } from '@types/index'
+import { Project, EditorState, UIState, Timeline, ProjectSettings, VideoClip, Track } from '@/types'
+import { generateId } from '@/utils/file-handler'
+import { databaseService } from '@/services/database'
 
 // ============================================
 // EDITOR STORE
@@ -26,6 +23,14 @@ interface EditorStore extends EditorState {
   setZoom: (zoom: number) => void
   setSelectedTrack: (trackId: string | null) => void
   setSelectedClip: (clipId: string | null) => void
+
+  // Clip operations
+  addClipToTrack: (trackId: string, clip: VideoClip) => void
+  removeClipFromTrack: (trackId: string, clipId: string) => void
+  updateClipInTrack: (trackId: string, clipId: string, updates: Partial<VideoClip>) => void
+  splitClipAtTime: (trackId: string, clipId: string, splitTime: number) => void
+  duplicateClip: (trackId: string, clipId: string) => void
+  rippleDeleteClip: (trackId: string, clipId: string) => void
 }
 
 export const useEditorStore = create<EditorStore>((set, get) => ({
@@ -47,11 +52,12 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   createNewProject: (name, width, height, fps) => {
     const defaultSettings: ProjectSettings = {
       outputFormat: 'mp4',
-      outputQuality: 'high',
-      outputResolution: '1080p',
+      outputQuality: 'original',
+      outputResolution: 'original',
       bitrate: 5000,
       audioCodec: 'aac',
       audioSampleRate: 48000,
+      preserveOriginal: true,
     }
 
     const newTimeline: Timeline = {
@@ -120,10 +126,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     if (!currentProject) return
 
     try {
-      const db = await openIndexedDB()
-      const tx = db.transaction(['projects'], 'readwrite')
-      const store = tx.objectStore('projects')
-      await store.put(currentProject)
+      await databaseService.saveProject(currentProject)
     } catch (error) {
       console.error('Failed to save project:', error)
     }
@@ -131,15 +134,10 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   loadProject: async (projectId: string) => {
     try {
-      const db = await openIndexedDB()
-      const tx = db.transaction(['projects'], 'readonly')
-      const store = tx.objectStore('projects')
-      const request = store.get(projectId)
-      const project = await new Promise<Project>((resolve, reject) => {
-        request.onsuccess = () => resolve(request.result)
-        request.onerror = () => reject(request.error)
-      })
-      set({ currentProject: project, timeline: project.timeline })
+      const project = await databaseService.getProject(projectId)
+      if (project) {
+        set({ currentProject: project, timeline: project.timeline })
+      }
     } catch (error) {
       console.error('Failed to load project:', error)
     }
@@ -147,10 +145,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   deleteProject: async (projectId: string) => {
     try {
-      const db = await openIndexedDB()
-      const tx = db.transaction(['projects'], 'readwrite')
-      const store = tx.objectStore('projects')
-      await store.delete(projectId)
+      await databaseService.deleteProject(projectId)
       set((state) => ({
         projects: state.projects.filter((p) => p.id !== projectId),
       }))
@@ -194,10 +189,183 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   setIsPlaying: (playing) => set({ isPlaying: playing }),
   setCurrentTime: (time) => set({ currentTime: time }),
-  setPlaybackSpeed: (speed) => set({ playbackSpeed: speed }),
+  setPlaybackSpeed: (speed) => set({ playbackSpeed: Math.max(0.25, Math.min(speed, 2)) }),
   setZoom: (zoom) => set({ zoom: Math.max(0.1, Math.min(zoom, 5)) }),
   setSelectedTrack: (trackId) => set({ selectedTrackId: trackId }),
   setSelectedClip: (clipId) => set({ selectedClipId: clipId }),
+
+  // Clip operations
+  addClipToTrack: (trackId, clip) => {
+    set((state) => {
+      if (!state.currentProject) return state
+
+      const newProject = { ...state.currentProject }
+      const track = newProject.timeline.tracks.find((t) => t.id === trackId)
+
+      if (track && track.type === 'video') {
+        track.items.push(clip)
+        newProject.timeline.duration = Math.max(
+          newProject.timeline.duration,
+          clip.endTime
+        )
+        newProject.updatedAt = Date.now()
+      }
+
+      return {
+        currentProject: newProject,
+        timeline: newProject.timeline,
+      }
+    })
+  },
+
+  removeClipFromTrack: (trackId, clipId) => {
+    set((state) => {
+      if (!state.currentProject) return state
+
+      const newProject = { ...state.currentProject }
+      const track = newProject.timeline.tracks.find((t) => t.id === trackId)
+
+      if (track) {
+        track.items = track.items.filter((item: any) => item.id !== clipId)
+        newProject.updatedAt = Date.now()
+      }
+
+      return {
+        currentProject: newProject,
+        timeline: newProject.timeline,
+      }
+    })
+  },
+
+  updateClipInTrack: (trackId, clipId, updates) => {
+    set((state) => {
+      if (!state.currentProject) return state
+
+      const newProject = { ...state.currentProject }
+      const track = newProject.timeline.tracks.find((t) => t.id === trackId)
+
+      if (track) {
+        const clipIndex = track.items.findIndex((item: any) => item.id === clipId)
+        if (clipIndex !== -1) {
+          track.items[clipIndex] = { ...track.items[clipIndex], ...updates }
+          newProject.updatedAt = Date.now()
+        }
+      }
+
+      return {
+        currentProject: newProject,
+        timeline: newProject.timeline,
+      }
+    })
+  },
+
+  splitClipAtTime: (trackId, clipId, splitTime) => {
+    set((state) => {
+      if (!state.currentProject) return state
+
+      const newProject = { ...state.currentProject }
+      const track = newProject.timeline.tracks.find((t) => t.id === trackId)
+
+      if (track) {
+        const clipIndex = track.items.findIndex((item: any) => item.id === clipId)
+        if (clipIndex !== -1) {
+          const clip = track.items[clipIndex] as VideoClip
+
+          if (splitTime > clip.startTime && splitTime < clip.endTime) {
+            const firstClip: VideoClip = {
+              ...clip,
+              id: generateId('clip'),
+              endTime: splitTime,
+              duration: splitTime - clip.startTime,
+            }
+
+            const secondClip: VideoClip = {
+              ...clip,
+              id: generateId('clip'),
+              startTime: splitTime,
+              duration: clip.endTime - splitTime,
+            }
+
+            track.items.splice(clipIndex, 1, firstClip, secondClip)
+            newProject.updatedAt = Date.now()
+          }
+        }
+      }
+
+      return {
+        currentProject: newProject,
+        timeline: newProject.timeline,
+      }
+    })
+  },
+
+  duplicateClip: (trackId, clipId) => {
+    set((state) => {
+      if (!state.currentProject) return state
+
+      const newProject = { ...state.currentProject }
+      const track = newProject.timeline.tracks.find((t) => t.id === trackId)
+
+      if (track) {
+        const clipIndex = track.items.findIndex((item: any) => item.id === clipId)
+        if (clipIndex !== -1) {
+          const clip = track.items[clipIndex] as VideoClip
+          const duration = clip.endTime - clip.startTime
+          const duplicatedClip: VideoClip = {
+            ...clip,
+            id: generateId('clip'),
+            startTime: clip.endTime,
+            endTime: clip.endTime + duration,
+          }
+          track.items.push(duplicatedClip)
+          newProject.timeline.duration = Math.max(
+            newProject.timeline.duration,
+            duplicatedClip.endTime
+          )
+          newProject.updatedAt = Date.now()
+        }
+      }
+
+      return {
+        currentProject: newProject,
+        timeline: newProject.timeline,
+      }
+    })
+  },
+
+  rippleDeleteClip: (trackId, clipId) => {
+    set((state) => {
+      if (!state.currentProject) return state
+
+      const newProject = { ...state.currentProject }
+      const track = newProject.timeline.tracks.find((t) => t.id === trackId)
+
+      if (track) {
+        const clipIndex = track.items.findIndex((item: any) => item.id === clipId)
+        if (clipIndex !== -1) {
+          const clip = track.items[clipIndex] as VideoClip
+          const duration = clip.endTime - clip.startTime
+
+          // Remove the clip
+          track.items.splice(clipIndex, 1)
+
+          // Shift subsequent clips
+          for (let i = clipIndex; i < track.items.length; i++) {
+            const item = track.items[i] as any
+            item.startTime -= duration
+            item.endTime -= duration
+          }
+
+          newProject.updatedAt = Date.now()
+        }
+      }
+
+      return {
+        currentProject: newProject,
+        timeline: newProject.timeline,
+      }
+    })
+  },
 }))
 
 // ============================================
@@ -233,23 +401,3 @@ export const useUIStore = create<UIStoreType>((set) => ({
   setPreviewAspectRatio: (ratio) => set({ previewAspectRatio: ratio }),
   setPreviewFullscreen: (fullscreen) => set({ previewFullscreen: fullscreen }),
 }))
-
-// ============================================
-// INDEXEDDB HELPERS
-// ============================================
-
-function openIndexedDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open('APSVideoEditor', 1)
-
-    request.onerror = () => reject(request.error)
-    request.onsuccess = () => resolve(request.result)
-
-    request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result
-      if (!db.objectStoreNames.contains('projects')) {
-        db.createObjectStore('projects', { keyPath: 'id' })
-      }
-    }
-  })
-}
